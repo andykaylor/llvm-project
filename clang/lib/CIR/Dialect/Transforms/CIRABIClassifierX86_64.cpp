@@ -46,6 +46,10 @@ protected:
   const llvm::abi::TargetInfo &
   getTargetInfo(cir::FuncOp featureSource) override;
 
+  bool isSupportedType(mlir::Type ty) const override {
+    return isSupportedABIType(ty, dl, /*applySysVRules=*/true);
+  }
+
 private:
   /// One library classifier per AVX level, built on first use.  A
   /// per-function target attribute can raise the level above the module's.

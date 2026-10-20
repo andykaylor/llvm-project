@@ -6,6 +6,10 @@
 // RUN: %clang_cc1 -triple arm64-apple-ios -target-abi darwinpcs -fenable-matrix -fexperimental-abi-lowering -emit-llvm -o - %s 2>&1 | FileCheck %s --check-prefix=LATEST --implicit-check-not="not yet implemented"
 // RUN: %clang_cc1 -triple arm64-apple-ios -target-abi darwinpcs -fclang-abi-compat=23 -fenable-matrix -emit-llvm -o - %s | FileCheck %s --check-prefix=COMPAT23
 // RUN: %clang_cc1 -triple arm64-apple-ios -target-abi darwinpcs -fclang-abi-compat=23 -fenable-matrix -fexperimental-abi-lowering -emit-llvm -o - %s 2>&1 | FileCheck %s --check-prefix=COMPAT23 --implicit-check-not="not yet implemented"
+// RUN: %if cir-enabled %{ %clang_cc1 -triple aarch64-linux-gnu -fenable-matrix -fclangir -emit-llvm -o - %s | FileCheck %s --check-prefix=LATEST %}
+// RUN: %if cir-enabled %{ %clang_cc1 -triple aarch64-linux-gnu -fclang-abi-compat=23 -fenable-matrix -fclangir -emit-llvm -o - %s | FileCheck %s --check-prefix=COMPAT23 %}
+// RUN: %if cir-enabled %{ %clang_cc1 -triple arm64-apple-ios -target-abi darwinpcs -fenable-matrix -fclangir -emit-llvm -o - %s | FileCheck %s --check-prefix=LATEST %}
+// RUN: %if cir-enabled %{ %clang_cc1 -triple arm64-apple-ios -target-abi darwinpcs -fclang-abi-compat=23 -fenable-matrix -fclangir -emit-llvm -o - %s | FileCheck %s --check-prefix=COMPAT23 %}
 
 // A struct whose only field is a 2x2 float matrix is a homogeneous aggregate
 // and is returned as the struct. Clang 23 did not accept a matrix as an HFA

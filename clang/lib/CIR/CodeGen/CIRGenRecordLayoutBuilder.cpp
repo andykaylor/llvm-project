@@ -964,10 +964,17 @@ CIRGenTypes::computeRecordLayout(const RecordDecl *rd, cir::RecordType *ty) {
       hasTrivialDestructor = cxxRD->hasTrivialDestructor();
     const auto &astLayout = astContext.getASTRecordLayout(rd);
     uint64_t recordAlignInBytes = astLayout.getAlignment().getQuantity();
+    uint64_t unadjustedAlignInBytes =
+        astLayout.getUnadjustedAlignment().getQuantity();
+    if (unadjustedAlignInBytes == recordAlignInBytes)
+      unadjustedAlignInBytes = 0;
+    bool isTransparentUnion = rd->hasAttr<TransparentUnionAttr>();
 
-    cgm.addRecordLayout(ty->getName(), cir::RecordLayoutAttr::get(
-                                           mlirCtx, apk, hasTrivialDestructor,
-                                           recordAlignInBytes));
+    cgm.addRecordLayout(
+        ty->getName(),
+        cir::RecordLayoutAttr::get(mlirCtx, apk, hasTrivialDestructor,
+                                   recordAlignInBytes, unadjustedAlignInBytes,
+                                   isTransparentUnion));
   }
 
   auto rl = std::make_unique<CIRGenRecordLayout>(

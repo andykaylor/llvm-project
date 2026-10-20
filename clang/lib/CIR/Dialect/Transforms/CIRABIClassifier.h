@@ -124,6 +124,15 @@ protected:
   virtual const llvm::abi::TargetInfo &
   getTargetInfo(cir::FuncOp featureSource) = 0;
 
+  /// Whether the bridge can map \p ty to an llvm::abi type and convert this
+  /// target's classification of it back.  A signature naming any other type
+  /// is reported as not yet implemented.
+  virtual bool isSupportedType(mlir::Type ty) const = 0;
+
+  /// The largest alignment the target gives a vector type, or none to use
+  /// the alignment CIR's DataLayout gives it.
+  virtual llvm::MaybeAlign getMaxVectorAlign() const { return std::nullopt; }
+
   /// Classify \p ty, the type fetched by a `cir.va_arg`, as an unnamed
   /// argument with every argument register free.
   std::optional<mlir::abi::ArgClassification>
@@ -166,6 +175,12 @@ std::unique_ptr<CIRABIClassifier>
 createX86_64ABIClassifier(const mlir::DataLayout &dl, mlir::ModuleOp modOp,
                           const ABIClassifierOptions &options);
 
+/// The AArch64 classifier, covering AAPCS64 and DarwinPCS.  The ABI variant,
+/// endianness, data model, and source language come from \p modOp's
+/// attributes.
+std::unique_ptr<CIRABIClassifier>
+createAArch64ABIClassifier(const mlir::DataLayout &dl, mlir::ModuleOp modOp);
+
 //===----------------------------------------------------------------------===//
 // Classification helpers defined in CallConvLoweringPass.cpp
 //===----------------------------------------------------------------------===//
@@ -184,6 +199,14 @@ classifyFunction(cir::FuncOp func, const mlir::DataLayout &dl,
 
 /// Where \p fnTy's declared parameters end and its ellipsis arguments begin.
 llvm::abi::RequiredArgs requiredArgs(cir::FuncType fnTy);
+
+/// Whether the bridge to the LLVM ABI Lowering Library can map \p ty.  With
+/// \p applySysVRules set, the types the x86_64 classification is not yet
+/// verified for are also refused: a matrix, a vector of a `_BitInt` narrower
+/// than a byte, and a record that the eightbyte rules would need a coercion
+/// the bridge cannot build for.
+bool isSupportedABIType(mlir::Type ty, const mlir::DataLayout &dl,
+                        bool applySysVRules);
 
 /// The AVX level to classify \p func at: \p base, raised if the function's own
 /// recorded feature list enables a wider vector.

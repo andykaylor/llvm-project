@@ -17,6 +17,7 @@
 #include "clang/CIR/Dialect/IR/CIRTypes.h"
 #include "clang/CIR/MissingFeatures.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/IR/Attributes.h"
 #include "llvm/Support/MathExtras.h"
 #include <algorithm>
 #include <array>
@@ -80,6 +81,16 @@ cir::RecordType getFlattenedCoercedType(const ArgClassification &ac) {
   return recTy;
 }
 
+/// Whether \p ac is an Extend of a record argument of type \p origTy.  Such an
+/// argument is a transparent union, passed as its first member, which
+/// \p ac.coercedType holds.
+bool isRecordExtend(const ArgClassification &ac, mlir::Type origTy) {
+  if (ac.kind != ArgKind::Extend || !mlir::isa<cir::RecordType>(origTy))
+    return false;
+  assert(ac.coercedType && "an Extend of a record names its first member type");
+  return true;
+}
+
 /// Build the new argument-type list for a function whose ABI classification
 /// is \p fc.  Handles Direct (with or without coercion), Extend, Ignore,
 /// Indirect (byval and non-byval), and Expand (struct flattening) arguments.
@@ -126,11 +137,13 @@ buildNewArgTypes(ArrayRef<mlir::Type> oldArgTypes,
     case ArgKind::Extend:
       // Extend keeps the original (narrow) type in the signature; the
       // sign/zero extension is communicated to LLVM via the llvm.signext /
-      // llvm.zeroext arg attribute, attached separately below.  Any
-      // coercedType the classifier set on the Extend ArgClassification is
-      // informational (typically the register-width type the value gets
-      // extended to in registers) but does not change the CIR signature.
-      newArgTypes.push_back(origTy);
+      // llvm.zeroext arg attribute, attached separately below.  For an integer
+      // the coercedType the classifier set is informational (typically the
+      // register-width type the value gets extended to in registers) and does
+      // not change the CIR signature.  A transparent union is passed as the
+      // type of its first member, which coercedType holds.
+      newArgTypes.push_back(isRecordExtend(ac, origTy) ? ac.coercedType
+                                                       : origTy);
       break;
     case ArgKind::Indirect:
       newArgTypes.push_back(cir::PointerType::get(origTy));
@@ -201,24 +214,26 @@ static bool isCoercionWiderThanMemory(mlir::Type origTy, mlir::Type coercedTy,
 /// Whether updateArgAttrs has anything to change: an arg that is Ignore (its
 /// slot is dropped), Extend (needs llvm.signext / llvm.zeroext), Indirect
 /// (needs the pointer attributes), Expand (changes the argument count), or a
-/// coerced Direct, which may be flattened or may lose llvm.noundef.
+/// Direct that is coerced, which may be flattened or may lose llvm.noundef,
+/// or that has a stack-slot alignment, which needs llvm.alignstack.
 static bool needsArgAttrUpdate(const FunctionClassification &fc) {
   return llvm::any_of(fc.argInfos, [](const ArgClassification &ac) {
     return ac.kind == ArgKind::Ignore || ac.kind == ArgKind::Extend ||
            ac.kind == ArgKind::Indirect || ac.kind == ArgKind::Expand ||
-           (ac.kind == ArgKind::Direct && ac.coercedType);
+           (ac.kind == ArgKind::Direct && (ac.coercedType || ac.directAlign));
   });
 }
 
 /// Build an updated arg_attrs ArrayAttr that drops Ignore'd args, adds
 /// llvm.signext / llvm.zeroext on Extend args, adds the pointer attributes
 /// for Indirect args in place of llvm.nofpclass, drops llvm.noundef from a
-/// coerced Direct arg that passes undefined bits, gives each field of a
+/// coerced Direct arg that passes undefined bits, adds llvm.alignstack on a
+/// Direct arg with a stack-slot alignment, gives each field of a
 /// Direct+canFlatten argument the argument's attributes, and gives each field
 /// of an Expand argument an empty dict.  Direct and Extend slots keep their
 /// other existing attributes.  \p origArgTypes provides the pre-rewrite type
 /// for each arg slot.
-mlir::ArrayAttr updateArgAttrs(mlir::MLIRContext *ctx,
+mlir::ArrayAttr updateArgAttrs(mlir::MLIRContext *ctx, mlir::ModuleOp module,
                                ArrayRef<mlir::Type> origArgTypes,
                                mlir::ArrayAttr existingArgAttrs,
                                const FunctionClassification &fc,
@@ -232,10 +247,19 @@ mlir::ArrayAttr updateArgAttrs(mlir::MLIRContext *ctx,
     mlir::DictionaryAttr existing = builder.getDictionaryAttr({});
     if (existingArgAttrs && oldIdx < existingArgAttrs.size())
       existing = mlir::cast<mlir::DictionaryAttr>(existingArgAttrs[oldIdx]);
+    // CIRGen marks a transparent union noundef, which holds only where it is
+    // extended, and marks no other record noundef.
     if (ac.kind == ArgKind::Direct && ac.coercedType &&
-        isCoercionWiderThanMemory(origArgTypes[oldIdx], ac.coercedType, dl)) {
+        (mlir::isa<cir::RecordType>(origArgTypes[oldIdx]) ||
+         isCoercionWiderThanMemory(origArgTypes[oldIdx], ac.coercedType, dl))) {
       mlir::NamedAttrList attrs(existing);
       attrs.erase(mlir::LLVM::LLVMDialect::getNoUndefAttrName());
+      existing = attrs.getDictionary(ctx);
+    }
+    if (ac.kind == ArgKind::Direct && ac.directAlign) {
+      mlir::NamedAttrList attrs(existing);
+      attrs.set(mlir::LLVM::LLVMDialect::getStackAlignmentAttrName(),
+                builder.getI64IntegerAttr(ac.directAlign->value()));
       existing = attrs.getDictionary(ctx);
     }
     if (cir::RecordType flatTy = getFlattenedCoercedType(ac)) {
@@ -279,15 +303,25 @@ mlir::ArrayAttr updateArgAttrs(mlir::MLIRContext *ctx,
       } else {
         // llvm.nofreeobj says the object cannot be freed while the callee
         // runs, which holds because the caller owns it across the call.
-        // Classic adds llvm.dead_on_return when the object's lifetime ends in
-        // the callee, which needs the destructor's triviality from
-        // cir.record_layout's has_trivial_dtor.
-        assert(!cir::MissingFeatures::deadOnReturnAttr());
         attrs.set(mlir::LLVM::LLVMDialect::getNoFreeObjAttrName(),
                   builder.getUnitAttr());
+        // llvm.dead_on_return says the object's lifetime ends in the callee,
+        // which holds unless the caller still has a destructor to run on it.
+        // A record with no layout entry has no destructor.
+        auto recTy = mlir::dyn_cast<cir::RecordType>(pointeeTy);
+        cir::RecordLayoutAttr layout =
+            recTy ? cir::tryGetRecordLayout(module, recTy.getName())
+                  : cir::RecordLayoutAttr();
+        if (!layout || layout.getHasTrivialDtor())
+          attrs.set(mlir::LLVM::LLVMDialect::getDeadOnReturnAttrName(),
+                    builder.getI64IntegerAttr(static_cast<int64_t>(
+                        llvm::DeadOnReturnInfo().toIntValue())));
+        // The object spans its allocation size, which is larger than its
+        // size for a vector whose size is not a power of two.
         attrs.set(mlir::LLVM::LLVMDialect::getDereferenceableAttrName(),
-                  builder.getI64IntegerAttr(
-                      dl.getTypeSize(pointeeTy).getFixedValue()));
+                  builder.getI64IntegerAttr(cir::CIRDataLayout(module)
+                                                .getTypeAllocSize(pointeeTy)
+                                                .getFixedValue()));
       }
       newArgAttrs.push_back(attrs.getDictionary(ctx));
     } else {
@@ -1178,7 +1212,8 @@ insertArgCoercion(mlir::FunctionOpInterface funcOp,
       continue;
     }
 
-    if (ac.kind == ArgKind::Direct && ac.coercedType) {
+    if ((ac.kind == ArgKind::Direct && ac.coercedType) ||
+        isRecordExtend(ac, blockArg.getType())) {
       mlir::Type oldArgTy = blockArg.getType();
       mlir::Type newArgTy = ac.coercedType;
       if (oldArgTy == newArgTy) {
@@ -1537,7 +1572,8 @@ mlir::LogicalResult rewriteIndirectReturnCall(
   // every argument classification.
   mlir::ArrayAttr argAttrs = call->getAttrOfType<mlir::ArrayAttr>("arg_attrs");
   if (needsArgAttrUpdate(fc))
-    argAttrs = updateArgAttrs(ctx, origCallArgTypes, argAttrs, fc, dl);
+    argAttrs = updateArgAttrs(ctx, call->getParentOfType<mlir::ModuleOp>(),
+                              origCallArgTypes, argAttrs, fc, dl);
   applySretSlotAttrs(newCall, argAttrs, origRetTy, sretAlign, builder);
 
   if (reuseStore) {
@@ -1889,7 +1925,7 @@ mlir::LogicalResult CIRABIRewriteContext::rewriteFunctionDefinition(
   if (hasSRet || needsArgAttrUpdate(fc)) {
     auto existing = funcOp->getAttrOfType<mlir::ArrayAttr>("arg_attrs");
     mlir::ArrayAttr updated =
-        updateArgAttrs(ctx, oldArgTypes, existing, fc, dl);
+        updateArgAttrs(ctx, module, oldArgTypes, existing, fc, dl);
     if (hasSRet) {
       // Prepend the sret slot's attribute dict (slot 0); the per-argument
       // dicts shift to slots 1..N.  noalias is valid only on the callee's
@@ -2057,8 +2093,9 @@ CIRABIRewriteContext::rewriteCallSite(mlir::Operation *callOp,
              "Expand classification requires a struct type, not a union");
       emitStructFieldArgs(builder, call.getLoc(), arg, recTy, newArgs,
                           deadRecordLoads);
-    } else if (ac.kind == ArgKind::Direct && ac.coercedType &&
-               arg.getType() != ac.coercedType) {
+    } else if ((ac.kind == ArgKind::Direct && ac.coercedType &&
+                arg.getType() != ac.coercedType) ||
+               isRecordExtend(ac, arg.getType())) {
       if (failed(rejectAtomicRecordLoad(call, arg)))
         return mlir::failure();
       if (cir::LoadOp recLoad = maybeGetCopyableRecordLoad(arg)) {
@@ -2196,8 +2233,8 @@ CIRABIRewriteContext::rewriteCallSite(mlir::Operation *callOp,
 
   if (needsArgAttrUpdate(fc)) {
     auto existing = call->getAttrOfType<mlir::ArrayAttr>("arg_attrs");
-    newCall->setAttr("arg_attrs",
-                     updateArgAttrs(ctx, origCallArgTypes, existing, fc, dl));
+    newCall->setAttr("arg_attrs", updateArgAttrs(ctx, module, origCallArgTypes,
+                                                 existing, fc, dl));
   }
   // Add llvm.signext / llvm.zeroext to an Extend return, and drop llvm.noundef
   // from a coerced Direct return that passes undefined bits.

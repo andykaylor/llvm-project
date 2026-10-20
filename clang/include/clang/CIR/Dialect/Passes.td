@@ -225,10 +225,11 @@ def CallConvLowering : Pass<"cir-call-conv-lowering", "mlir::ModuleOp"> {
 
     Two driver modes select how each function's classification is computed:
 
-    - `target=<name>` selects an ABI target.  Currently only `"test"` (the
-      MLIR test target in `mlir/lib/ABI/Targets/Test/`) is supported.  Real
-      targets (x86_64, AArch64, ...) will be added once the LLVM ABI library
-      ships them.
+    - `target=<name>` selects an ABI target: `"test"` (the MLIR test target
+      in `mlir/lib/ABI/Targets/Test/`), `"x86_64"` (System V), or
+      `"aarch64"` (AAPCS64 and its Darwin variant).  The AArch64 target
+      reads its ABI variant, endianness, and source language from the
+      module's `cir.triple`, `cir.target_abi`, and `cir.lang` attributes.
     - `classification-attr=<name>` reads a `DictionaryAttr` named `<name>`
       from each `cir.func` and parses it via the test-target injection
       helper.  Used by tests to inject arbitrary classifications without
@@ -246,7 +247,9 @@ def CallConvLowering : Pass<"cir-call-conv-lowering", "mlir::ModuleOp"> {
              clEnumValN(cir::CallConvTarget::Test, "test",
                         "MLIR test ABI target"),
              clEnumValN(cir::CallConvTarget::X86_64, "x86_64",
-                        "x86_64 System V")
+                        "x86_64 System V"),
+             clEnumValN(cir::CallConvTarget::AArch64, "aarch64",
+                        "AArch64 AAPCS64")
            )}]>,
     Option<"classificationAttr", "classification-attr", "std::string",
            /*default=*/"\"\"",

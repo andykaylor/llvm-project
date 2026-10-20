@@ -784,8 +784,14 @@ void CIRGenModule::constructFunctionArgumentAttributes(
     QualType argType = argCanType;
     const cir::ABIArgInfo argInfo = cir::ABIArgInfo::getDirect();
 
+    // A transparent union is passed as its first member, and is noundef where
+    // the target extends that member.  CallConvLowering removes the mark where
+    // it passes the member without extending it.
+    const RecordDecl *argRD = argType->getAsRecordDecl();
+    bool isTransparentUnion = argRD && argRD->hasAttr<TransparentUnionAttr>();
     if (codeGenOpts.EnableNoundefAttrs &&
-        determineNoUndef(argType, getTypes(), layout, argInfo))
+        (isTransparentUnion ||
+         determineNoUndef(argType, getTypes(), layout, argInfo)))
       argAttrList.set(mlir::LLVM::LLVMDialect::getNoUndefAttrName(),
                       mlir::UnitAttr::get(&getMLIRContext()));
 

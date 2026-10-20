@@ -82,6 +82,10 @@ struct ArgClassification {
   /// NO_CLASS and the value is carried in a later eightbyte (x86-64 SysV).
   unsigned directOffset = 0;
 
+  /// For Direct: the alignment of the argument's stack slot when the value
+  /// is passed in memory, if the ABI sets one apart from the type's.
+  llvm::MaybeAlign directAlign;
+
   /// How many integer and vector argument registers the value occupies.  Both
   /// zero means it travels in memory, which is also what a target whose
   /// classifier does not record the demand reports.
@@ -101,6 +105,7 @@ struct ArgClassification {
            indirectAlign == other.indirectAlign &&
            signExtend == other.signExtend && canFlatten == other.canFlatten &&
            byVal == other.byVal && directOffset == other.directOffset &&
+           directAlign == other.directAlign &&
            neededIntRegs == other.neededIntRegs &&
            neededSseRegs == other.neededSseRegs;
   }
