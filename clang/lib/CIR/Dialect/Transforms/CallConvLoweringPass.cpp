@@ -15,9 +15,10 @@
 //
 //   target=test
 //     Use the MLIR test ABI target (mlir/lib/ABI/Targets/Test/) to classify
-//     each function.  Predictable rules that approximate x86_64 SysV.  Real
-//     targets (x86_64, AArch64) will be added once the LLVM ABI library
-//     ships them.
+//     each function.  Predictable rules that approximate x86_64 SysV.
+//
+//   target=x86_64, target=amdgpu, target=aarch64
+//     Classify with the LLVM ABI Lowering Library's rules for that target.
 //
 //   classification-attr=<name>
 //     Read a DictionaryAttr named <name> from each cir.func and parse it via
@@ -148,6 +149,8 @@ createABIClassifier(cir::CallConvTarget target,
     return createX86_64ABIClassifier(dl, modOp, options);
   case cir::CallConvTarget::AMDGPU:
     return createAMDGPUABIClassifier(dl, modOp);
+  case cir::CallConvTarget::AArch64:
+    return createAArch64ABIClassifier(dl, modOp);
   case cir::CallConvTarget::None:
     break;
   }

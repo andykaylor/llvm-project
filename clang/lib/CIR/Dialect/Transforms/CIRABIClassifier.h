@@ -124,6 +124,10 @@ protected:
   virtual const llvm::abi::TargetInfo &
   getTargetInfo(cir::FuncOp featureSource) = 0;
 
+  /// The largest alignment the target gives a vector type, or none to use
+  /// the alignment CIR's DataLayout gives it.
+  virtual llvm::MaybeAlign getMaxVectorAlign() const { return std::nullopt; }
+
   /// Classify \p ty, the type fetched by a `cir.va_arg`, as an unnamed
   /// argument with every argument register free.
   mlir::FailureOr<mlir::abi::ArgClassification>
@@ -171,6 +175,12 @@ createX86_64ABIClassifier(const mlir::DataLayout &dl, mlir::ModuleOp modOp,
 /// The AMDGPU classifier.
 std::unique_ptr<CIRABIClassifier>
 createAMDGPUABIClassifier(const mlir::DataLayout &dl, mlir::ModuleOp modOp);
+
+/// The AArch64 classifier, covering AAPCS64 and DarwinPCS.  The ABI variant,
+/// endianness, data model, and source language come from \p modOp's
+/// attributes.
+std::unique_ptr<CIRABIClassifier>
+createAArch64ABIClassifier(const mlir::DataLayout &dl, mlir::ModuleOp modOp);
 
 /// Map a CIR calling convention to the llvm::CallingConv the ABI classifier
 /// uses.  Conventions the classifier does not distinguish fall back to C.
